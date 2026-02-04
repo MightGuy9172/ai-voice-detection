@@ -1,0 +1,15 @@
+This code:
+1.Accepts Base64-encoded MP3
+2.Works for Tamil, English, Hindi, Malayalam, Telugu
+3.Detects AI-generated vs Human
+4.Returns structured JSON with:
+    classification
+    confidence score
+    explanation
+
+Structure
+ai_voice_detector/
+│
+├── app.py
+├── requirements.txt
+└── temp_audio/
