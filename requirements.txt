@@ -1,10 +1,6 @@
 fastapi
 uvicorn
 python-dotenv
-pydantic
 librosa
 numpy
-torch
-transformers
-openai-whisper
 soundfile

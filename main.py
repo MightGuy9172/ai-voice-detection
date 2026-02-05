@@ -1,14 +1,11 @@
 import base64
 import os
 import uuid
-import subprocess
-
+import numpy as np
 import librosa
-import torch
+
 from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
-from transformers import Wav2Vec2Processor, Wav2Vec2Model
-import whisper
 from dotenv import load_dotenv
 
 # ---------------- LOAD ENV ----------------
@@ -19,26 +16,10 @@ if not API_KEY:
     raise RuntimeError("API_KEY missing")
 
 # ---------------- APP ----------------
-app = FastAPI(title="AI Voice Detection API")
+app = FastAPI(title="AI Voice Detection API (Lightweight)")
 
 TEMP_DIR = "temp"
 os.makedirs(TEMP_DIR, exist_ok=True)
-
-# ---------------- LAZY MODELS (CRITICAL) ----------------
-processor = None
-wav2vec = None
-whisper_model = None
-
-def load_wav2vec():
-    global processor, wav2vec
-    if processor is None or wav2vec is None:
-        processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
-        wav2vec = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
-
-def load_whisper():
-    global whisper_model
-    if whisper_model is None:
-        whisper_model = whisper.load_model("tiny")  # FREE-tier safe
 
 # ---------------- AUTH ----------------
 def verify_api_key(x_api_key: str = Header(...)):
@@ -51,82 +32,79 @@ class AudioInput(BaseModel):
     audioFormat: str | None = None
     audioBase64: str
 
-
 # ---------------- UTILS ----------------
-def save_and_convert_audio(audio_base64: str):
+def save_audio(audio_base64: str):
     try:
         audio_bytes = base64.b64decode(audio_base64)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid Base64 audio")
 
-    file_id = str(uuid.uuid4())
-    mp3 = f"{TEMP_DIR}/{file_id}.mp3"
-    wav = f"{TEMP_DIR}/{file_id}.wav"
-
-    with open(mp3, "wb") as f:
+    file_path = os.path.join(TEMP_DIR, f"{uuid.uuid4()}.mp3")
+    with open(file_path, "wb") as f:
         f.write(audio_bytes)
 
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", mp3, "-ar", "16000", "-ac", "1", wav],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    return file_path
 
-    if not os.path.exists(wav):
-        os.remove(mp3)
-        raise HTTPException(status_code=500, detail="FFmpeg conversion failed")
+def extract_features(audio_path):
+    y, sr = librosa.load(audio_path, sr=16000)
 
-    return mp3, wav
+    # Pitch variation
+    pitches, _ = librosa.piptrack(y=y, sr=sr)
+    pitch_values = pitches[pitches > 0]
+    pitch_variance = np.var(pitch_values) if len(pitch_values) > 0 else 0
 
-def extract_features(wav_path):
-    load_wav2vec()
-    audio, _ = librosa.load(wav_path, sr=16000)
-    inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
+    # Energy variation
+    energy_variance = np.var(librosa.feature.rms(y=y))
 
-    with torch.no_grad():
-        outputs = wav2vec(**inputs)
+    # Spectral flatness
+    flatness = np.mean(librosa.feature.spectral_flatness(y=y))
 
-    return outputs.last_hidden_state.mean(dim=1)
+    # Silence ratio
+    intervals = librosa.effects.split(y, top_db=25)
+    silence_ratio = 1 - (np.sum(intervals[:, 1] - intervals[:, 0]) / len(y))
 
-def detect_language(wav_path):
-    load_whisper()
-    return whisper_model.transcribe(wav_path).get("language", "unknown")
+    return pitch_variance, energy_variance, flatness, silence_ratio
 
 def classify(features):
-    confidence = torch.sigmoid(features.mean()).item()
-    confidence = round(confidence, 2)
+    pitch_var, energy_var, flatness, silence_ratio = features
+
+    score = (
+        0.4 * (1 / (1 + pitch_var)) +
+        0.3 * (1 / (1 + energy_var)) +
+        0.2 * flatness +
+        0.1 * silence_ratio
+    )
+
+    confidence = round(float(min(max(score, 0.0), 1.0)), 2)
 
     if confidence >= 0.5:
         return (
             "AI_GENERATED",
             confidence,
-            "Over-smooth prosody and limited pitch variation detected, typical of AI-generated speech."
+            "Low pitch variation and smooth energy patterns detected, which are commonly observed in AI-generated speech."
         )
     else:
         return (
             "HUMAN",
             confidence,
-            "Natural pitch variation and micro-pauses detected, typical of human speech."
+            "Natural pitch variation and irregular energy patterns detected, typical of human speech."
         )
 
 # ---------------- ENDPOINT ----------------
 @app.post("/detect", dependencies=[Depends(verify_api_key)])
 def detect_voice(data: AudioInput):
-    mp3, wav = save_and_convert_audio(data.audioBase64)
+    audio_path = save_audio(data.audioBase64)
 
     try:
-        features = extract_features(wav)
-        detected_language = detect_language(wav)
+        features = extract_features(audio_path)
         label, confidence, explanation = classify(features)
     finally:
-        if os.path.exists(mp3):
-            os.remove(mp3)
-        if os.path.exists(wav):
-            os.remove(wav)
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
 
     return {
         "classification": label,
         "confidence_score": confidence,
-        "language": detected_language,
+        "language": data.language or "unknown",
         "explanation": explanation
     }
