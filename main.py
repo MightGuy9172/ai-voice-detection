@@ -45,9 +45,12 @@ def verify_api_key(x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-# ---------------- REQUEST ----------------
+# ---------------- REQUEST MODEL ----------------
 class AudioInput(BaseModel):
-    audio_base64: str
+    language: str | None = None
+    audioFormat: str | None = None
+    audioBase64: str
+
 
 # ---------------- UTILS ----------------
 def save_and_convert_audio(audio_base64: str):
@@ -109,11 +112,11 @@ def classify(features):
 # ---------------- ENDPOINT ----------------
 @app.post("/detect", dependencies=[Depends(verify_api_key)])
 def detect_voice(data: AudioInput):
-    mp3, wav = save_and_convert_audio(data.audio_base64)
+    mp3, wav = save_and_convert_audio(data.audioBase64)
 
     try:
         features = extract_features(wav)
-        language = detect_language(wav)
+        detected_language = detect_language(wav)
         label, confidence, explanation = classify(features)
     finally:
         if os.path.exists(mp3):
@@ -124,6 +127,6 @@ def detect_voice(data: AudioInput):
     return {
         "classification": label,
         "confidence_score": confidence,
-        "language": language,
+        "language": detected_language,
         "explanation": explanation
     }
